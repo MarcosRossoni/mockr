@@ -1,0 +1,29 @@
+[
+  {
+    "id": "{{seq}}",
+    "uuid": "{{uuid}}",
+    "name": "{{faker.name}}",
+    "email": "{{faker.email}}",
+    "active": "{{rand.bool}}",
+    "score": "{{rand.float}}",
+    "createdAt": "{{now}}"
+  },
+  {
+    "id": "{{seq}}",
+    "uuid": "{{uuid}}",
+    "name": "{{faker.name}}",
+    "email": "{{faker.email}}",
+    "active": "{{rand.bool}}",
+    "score": "{{rand.float}}",
+    "createdAt": "{{now}}"
+  },
+  {
+    "id": "{{seq}}",
+    "uuid": "{{uuid}}",
+    "name": "{{faker.name}}",
+    "email": "{{faker.email}}",
+    "active": "{{rand.bool}}",
+    "score": "{{rand.float}}",
+    "createdAt": "{{now}}"
+  }
+]

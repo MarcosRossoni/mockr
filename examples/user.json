@@ -1,0 +1,11 @@
+{
+  "id": "{{seq}}",
+  "uuid": "{{uuid}}",
+  "name": "{{faker.name}}",
+  "email": "{{faker.email}}",
+  "username": "{{faker.username}}",
+  "phone": "{{faker.phone}}",
+  "active": "{{rand.bool}}",
+  "score": "{{rand.float}}",
+  "createdAt": "{{now}}"
+}

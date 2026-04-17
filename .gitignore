@@ -1,0 +1,24 @@
+# Binário compilado
+mockr
+
+# Arquivos internos do projeto
+CLAUDE.md
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
