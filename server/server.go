@@ -5,6 +5,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -125,12 +126,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		count = 0 // count só é significativo em GETs
 	}
 
+	// Lê o body da request uma única vez para métodos que podem enviar payload.
+	// Para GET/HEAD/DELETE o body é nil e os templates {{body.*}} retornam "".
+	var bodyCtx map[string]any
+	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+		if data, err := io.ReadAll(r.Body); err == nil && len(data) > 0 {
+			json.Unmarshal(data, &bodyCtx) //nolint:errcheck — body inválido simplesmente não popula o contexto
+		}
+	}
+
 	pathMatched := false
 	for _, e := range s.routes {
 		if matchPath(e.route.Path, path) {
 			pathMatched = true
 			if strings.EqualFold(r.Method, e.route.Method) {
-				serveRoute(rw, e.route, e.body, count)
+				serveRoute(rw, e.route, e.body, count, bodyCtx)
 				s.emit(r.Method, path, rw.status, time.Since(start))
 				return
 			}
@@ -219,7 +229,8 @@ func matchPath(pattern, actual string) bool {
 
 // serveRoute aplica delay, renderiza templates e escreve a resposta HTTP.
 // count > 0 em GETs: retorna um array JSON com count itens gerados dinamicamente.
-func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody, count int) {
+// bodyCtx contém os campos do body da request para resolução de {{body.*}}.
+func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody, count int, bodyCtx map[string]any) {
 	if r.Delay > 0 {
 		time.Sleep(r.Delay)
 	}
@@ -230,7 +241,7 @@ func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody
 	if count > 0 {
 		out, err = renderMany(body.Raw, count)
 	} else {
-		out, err = engine.RenderJSON(body.Raw)
+		out, err = engine.RenderJSONWithContext(body.Raw, bodyCtx)
 	}
 
 	if err != nil {

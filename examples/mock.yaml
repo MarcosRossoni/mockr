@@ -12,6 +12,6 @@ routes:
 
   - method: POST
     path: /users
-    response: ./examples/user.json
+    response: ./examples/user_created.json
     status: 201
     delay: 100ms

@@ -1,0 +1,10 @@
+{
+  "id": "{{uuid}}",
+  "name": "{{body.name}}",
+  "email": "{{body.email}}",
+  "username": "{{body.username}}",
+  "phone": "{{body.phone}}",
+  "document": "{{body.document}}",
+  "active": true,
+  "createdAt": "{{now}}"
+}

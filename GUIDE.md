@@ -376,6 +376,45 @@ Quando um template está **embutido em texto**, o resultado é sempre string:
 | `{{faker.word}}` | string | `"lorem"` |
 | `{{faker.sentence}}` | string | `"Lorem ipsum dolor amet consectetur."` |
 
+### Templates do body da request — `{{body.*}}`
+
+Em requisições **POST, PUT e PATCH**, você pode espelhar campos do body enviado pelo cliente diretamente na resposta. Use `{{body.campo}}` para acessar qualquer campo do JSON recebido.
+
+Suporta dot notation para campos aninhados: `{{body.address.city}}`.
+
+Se o campo não existir no body, retorna string vazia.
+
+**Exemplo:**
+
+Request — `POST /users` com body:
+```json
+{ "name": "Marco", "email": "marco@exemplo.com", "document": "123.456.789-00" }
+```
+
+`user_created.json`:
+```json
+{
+  "id": "{{uuid}}",
+  "name": "{{body.name}}",
+  "email": "{{body.email}}",
+  "document": "{{body.document}}",
+  "createdAt": "{{now}}"
+}
+```
+
+Resposta gerada:
+```json
+{
+  "id": "bb44cca7-268a-42fd-a946-0f4e6b5f3cc3",
+  "name": "Marco",
+  "email": "marco@exemplo.com",
+  "document": "123.456.789-00",
+  "createdAt": "2026-04-17T14:32:01Z"
+}
+```
+
+> `{{body.*}}` em GETs e DELETEs retorna string vazia — esses métodos não têm body.
+
 ### Exemplo completo de JSON com templates
 
 ```json

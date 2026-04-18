@@ -26,7 +26,13 @@ var seq int64
 // substitui strings que contenham templates pelos valores gerados.
 // Retorna a estrutura reconstruída — o original não é modificado.
 func Render(data any) any {
-	return walk(data)
+	return walkCtx(data, nil)
+}
+
+// RenderWithContext é igual a Render mas recebe o body da request como contexto.
+// Permite que templates {{body.campo}} sejam resolvidos com valores da request.
+func RenderWithContext(data any, bodyCtx map[string]any) any {
+	return walkCtx(data, bodyCtx)
 }
 
 // RenderJSON é um atalho que renderiza e serializa para []byte.
@@ -34,40 +40,41 @@ func RenderJSON(data any) ([]byte, error) {
 	return json.MarshalIndent(Render(data), "", "  ")
 }
 
-// walk percorre a árvore de dados recursivamente.
-// Em Go, type switch permite inspecionar o tipo concreto de um interface{}.
-func walk(v any) any {
+// RenderJSONWithContext é um atalho que renderiza com contexto e serializa para []byte.
+func RenderJSONWithContext(data any, bodyCtx map[string]any) ([]byte, error) {
+	return json.MarshalIndent(RenderWithContext(data, bodyCtx), "", "  ")
+}
+
+// walkCtx percorre a árvore de dados recursivamente com contexto opcional do body da request.
+func walkCtx(v any, bodyCtx map[string]any) any {
 	switch val := v.(type) {
 	case map[string]any:
-		// Reconstrói o mapa com cada valor renderizado
 		out := make(map[string]any, len(val))
 		for k, v2 := range val {
-			out[k] = walk(v2)
+			out[k] = walkCtx(v2, bodyCtx)
 		}
 		return out
 
 	case []any:
-		// Reconstrói o slice com cada elemento renderizado
 		out := make([]any, len(val))
 		for i, v2 := range val {
-			out[i] = walk(v2)
+			out[i] = walkCtx(v2, bodyCtx)
 		}
 		return out
 
 	case string:
-		return renderString(val)
+		return renderStringCtx(val, bodyCtx)
 
 	default:
-		// Números, booleans, nil — devolvemos sem modificar
 		return v
 	}
 }
 
-// renderString resolve os templates dentro de uma string.
+// renderStringCtx resolve os templates dentro de uma string usando o contexto do body.
 // Se a string inteira for um único template (ex: "{{seq}}"), devolve o
 // tipo nativo (int, bool, float64) em vez de string — permitindo que
 // campos JSON recebam o tipo correto.
-func renderString(s string) any {
+func renderStringCtx(s string, bodyCtx map[string]any) any {
 	matches := templateRe.FindAllString(s, -1)
 	if len(matches) == 0 {
 		return s
@@ -76,12 +83,12 @@ func renderString(s string) any {
 	// String é exatamente um template — pode devolver tipo nativo
 	if len(matches) == 1 && strings.TrimSpace(s) == matches[0] {
 		name := extractName(matches[0])
-		return resolve(name)
+		return resolveCtx(name, bodyCtx)
 	}
 
 	// Múltiplos templates ou template embutido em texto — substituição textual
 	result := templateRe.ReplaceAllStringFunc(s, func(match string) string {
-		return fmt.Sprintf("%v", resolve(extractName(match)))
+		return fmt.Sprintf("%v", resolveCtx(extractName(match), bodyCtx))
 	})
 	return result
 }
@@ -89,6 +96,40 @@ func renderString(s string) any {
 func extractName(token string) string {
 	// token tem formato "{{nome}}" — remove as chaves e espaços
 	return strings.TrimSpace(token[2 : len(token)-2])
+}
+
+// resolveCtx converte um nome de template no valor correspondente.
+// Suporta {{body.campo}} para acessar campos do body da request (dot notation).
+func resolveCtx(name string, bodyCtx map[string]any) any {
+	if strings.HasPrefix(name, "body.") {
+		if bodyCtx == nil {
+			return ""
+		}
+		return lookupBody(bodyCtx, name[5:])
+	}
+	return resolve(name)
+}
+
+// lookupBody navega no mapa usando dot notation (ex: "address.city").
+func lookupBody(m map[string]any, key string) any {
+	dot := strings.Index(key, ".")
+	if dot == -1 {
+		v, ok := m[key]
+		if !ok {
+			return ""
+		}
+		return v
+	}
+	head, tail := key[:dot], key[dot+1:]
+	nested, ok := m[head]
+	if !ok {
+		return ""
+	}
+	nestedMap, ok := nested.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return lookupBody(nestedMap, tail)
 }
 
 // resolve converte um nome de template no valor correspondente.
