@@ -13,6 +13,7 @@ mockr é uma ferramenta de terminal para subir servidores HTTP mock durante o de
    - [serve](#serve)
    - [validate](#validate)
    - [stress](#stress)
+   - [request](#request)
 5. [Templates dinâmicos](#templates-dinâmicos)
 6. [Interface TUI](#interface-tui)
 7. [Exemplos práticos](#exemplos-práticos)
@@ -63,8 +64,13 @@ routes:
 
   - method: POST
     path: /users
-    response: ./user.json
+    response: ./user_created.json
+    body: ./user.json        # JSON enviado ao disparar mockr request
     status: 201
+    headers:
+      Authorization: "Bearer meu-token"
+      X-Request-ID: "{{uuid}}"
+      X-Timestamp: "{{now.unix}}"
 ```
 
 **2. Crie o arquivo de resposta JSON:**
@@ -140,6 +146,9 @@ routes:
 | `method` | Sim | Método HTTP: `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
 | `path` | Sim | Caminho da rota. Use `:param` para parâmetros dinâmicos |
 | `response` | Sim | Caminho para o arquivo JSON de resposta |
+| `body` | Não | Caminho para o JSON de body de saída (usado pelo `mockr request`). Suporta templates faker. Aplicável apenas em POST, PUT e PATCH |
+| `headers` | Não | Mapa de headers extras enviados pelo `mockr request`. Valores suportam templates faker |
+| `auth` | Não | Se `true`, executa o fluxo de autenticação do bloco `auth` raiz antes de disparar |
 | `status` | Não | Status HTTP retornado. Padrão: `200` |
 | `delay` | Não | Atraso artificial por requisição. Ex: `50ms`, `1s`, `200ms` |
 
@@ -271,6 +280,187 @@ GET http://localhost:52341/users
 
 ---
 
+### request
+
+Dispara uma ou mais requisições HTTP e exibe a resposta formatada no terminal. Ideal para testar rapidamente uma rota ou integrar com uma API real usando dados faker.
+
+**Modo mock interno** — sobe o servidor e dispara contra ele:
+
+```bash
+./mockr request --config <arquivo.yaml> --path <path> [--method <METHOD>] [--repeat <n>]
+```
+
+**Modo URL externa** — dispara diretamente na URL informada, sem subir mock:
+
+```bash
+./mockr request --config <arquivo.yaml> --url <url> --method <METHOD> [--path <path>] [--repeat <n>]
+```
+
+| Flag | Obrigatório | Padrão | Descrição |
+|---|---|---|---|
+| `--config` | Sim | — | Arquivo YAML com as rotas |
+| `--path` | Sim* | — | Path da rota a chamar (*dispensável com `--url` se a rota não tiver body) |
+| `--method` | Não | `GET` | Método HTTP |
+| `--url` | Não | — | URL externa. Se ausente, usa o mock interno |
+| `--repeat` | Não | `1` | Número de vezes que a requisição é disparada |
+
+**Como os headers são configurados:**
+
+Defina o campo `headers` na rota do YAML com um mapa chave/valor. Os headers são enviados em toda requisição disparada pelo `mockr request` para aquela rota. Valores aceitam qualquer template faker:
+
+```yaml
+routes:
+  - method: POST
+    path: /users
+    response: ./user_created.json
+    body: ./user.json
+    status: 201
+    headers:
+      Authorization: "Bearer meu-token-secreto"
+      X-User-Secret: "abc123"
+      X-Pass-Secret: "xyz789"
+      X-Request-ID: "{{uuid}}"       # UUID único por requisição
+      X-Timestamp: "{{now.unix}}"    # epoch atual
+      X-Tenant: "acme"
+```
+
+Rotas sem `headers` não enviam nenhum header extra. O `Content-Type: application/json` é sempre adicionado automaticamente quando há body — mas pode ser sobrescrito declarando-o explicitamente no mapa.
+
+O output do `mockr request` exibe os headers enviados com os valores já resolvidos:
+
+```
+POST http://minha-api.com/users  →  201  (45ms)
+  headers enviados:
+    Authorization: Bearer meu-token-secreto
+    X-Request-ID: 79d166ab-9e06-410b-89d2-cb33250accbf
+    X-Timestamp: 1745492440
+    X-Tenant: acme
+```
+
+**Como o body é resolvido:**
+
+O comando localiza a rota correspondente no config pelo `--method` + `--path`. Se a rota tem o campo `body` definido e o método é POST, PUT ou PATCH, o JSON é carregado, os templates faker são resolvidos e o payload é enviado. Cada `--repeat` gera um body novo com dados distintos.
+
+---
+
+**Autenticação automática**
+
+Quando a rota declara `auth: true`, o `mockr request` dispara o fluxo de login antes de qualquer requisição, extrai o token da resposta e o injeta automaticamente no header configurado.
+
+**Passo 1 — defina o bloco `auth` na raiz do YAML:**
+
+```yaml
+auth:
+  url: http://minha-api.com/auth
+  method: POST
+  body: ./examples/auth_body.json   # credenciais enviadas no login
+  extract: "data.token"             # dot notation no JSON de resposta
+  header: "Authorization"           # header onde o token é injetado
+  prefix: "Bearer "                 # prefixo antes do valor (opcional)
+```
+
+**Passo 2 — marque as rotas que precisam de auth:**
+
+```yaml
+routes:
+  - method: POST
+    path: /orders
+    response: ./examples/order.json
+    body: ./examples/order.json
+    status: 201
+    auth: true                      # dispara o login antes desta rota
+```
+
+O token é buscado **uma única vez** antes do loop de `--repeat` e reutilizado em todas as requisições — não há novo login a cada disparo.
+
+**`extract` com dot notation** — acessa campos aninhados no JSON de resposta:
+
+```yaml
+extract: "token"              # resposta: { "token": "abc" }
+extract: "data.token"         # resposta: { "data": { "token": "abc" } }
+extract: "auth.access_token"  # resposta: { "auth": { "access_token": "abc" } }
+```
+
+---
+
+**Múltiplos usuários simultâneos**
+
+Para simular N usuários autenticados ao mesmo tempo — cada um com seu próprio token — substitua `body` por `users` no bloco `auth`, apontando para um array JSON de credenciais:
+
+```yaml
+auth:
+  url: http://minha-api.com/auth
+  method: POST
+  users: ./examples/auth_users.json   # array de credenciais, uma por usuário
+  extract: "data.token"
+  header: "Authorization"
+  prefix: "Bearer "
+```
+
+`auth_users.json`:
+```json
+[
+  { "username": "alice", "password": "pass_alice" },
+  { "username": "bob",   "password": "pass_bob"   },
+  { "username": "carol", "password": "pass_carol" },
+  { "username": "dave",  "password": "pass_dave"  },
+  { "username": "eve",   "password": "pass_eve"   }
+]
+```
+
+O mockr autentica todos os usuários **em paralelo** na inicialização. Durante o `--repeat`, cada requisição sorteia um usuário aleatoriamente e usa o token correspondente:
+
+```
+  auth → autenticando 5 usuário(s)...
+  auth ✓  alice | bob | carol | dave | eve  (5 tokens prontos)
+
+── requisição 1/10  [carol]
+POST http://minha-api.com/orders  →  201  (23ms)
+  headers enviados:
+    Authorization: Bearer c22b7b7a-b56c-4867-8093-858b088e0493
+
+── requisição 2/10  [alice]
+POST http://minha-api.com/orders  →  201  (19ms)
+  headers enviados:
+    Authorization: Bearer fa9ef575-ced3-456e-839a-c8df533199dc
+```
+
+O `extractLabel` detecta automaticamente o campo de identificação do usuário — tenta `username`, `email`, `user`, `login`, `name` (nessa ordem). Se nenhum for encontrado, usa `user1`, `user2`...
+
+**Exemplos:**
+
+```bash
+# GET simples contra o mock
+./mockr request --config ./mock.yaml --path /users
+
+# POST contra o mock — body lido do campo body da rota, faker resolvido
+./mockr request --config ./mock.yaml --path /users --method POST
+
+# 5 POSTs com dados faker diferentes em cada disparo
+./mockr request --config ./mock.yaml --path /users --method POST --repeat 5
+
+# POST direto na sua API — body ainda vem do config
+./mockr request --config ./mock.yaml --url http://minha-api.com/users --method POST --path /users
+```
+
+**Exemplo de saída:**
+
+```
+POST http://localhost:52981/users  →  201  (102ms)
+
+{
+  "id": "bb44cca7-268a-42fd-a946-0f4e6b5f3cc3",
+  "name": "Helena Silva",
+  "email": "helena.silva@gmail.com",
+  "phone": "+55 11 97432-8812",
+  "createdAt": "2026-04-19T14:32:01Z"
+}
+```
+
+O status é colorido: verde para 2xx, amarelo para 3xx, vermelho para 4xx/5xx.
+
+---
+
 ## Controle de volume por URL
 
 Em requisições `GET`, você pode informar quantos itens quer receber diretamente na URL, colocando um número inteiro no **primeiro segmento do path**:
@@ -352,8 +542,10 @@ Quando um template está **embutido em texto**, o resultado é sempre string:
 
 | Template | Tipo | Exemplo de saída |
 |---|---|---|
-| `{{now}}` | string | `"2026-04-17T13:00:40Z"` |
+| `{{now}}` | string | `"2026-04-19T13:00:40Z"` |
 | `{{now.unix}}` | int64 | `1745492440` |
+| `{{now.date}}` | string | `"2026-04-19"` |
+| `{{now.time}}` | string | `"13:00:40"` |
 
 **Números e booleanos**
 
@@ -363,18 +555,93 @@ Quando um template está **embutido em texto**, o resultado é sempre string:
 | `{{rand.bool}}` | bool | `true` ou `false` |
 | `{{rand.float}}` | float64 | `0.73` |
 
-**Dados faker**
+**Pessoa**
 
 | Template | Tipo | Exemplo de saída |
 |---|---|---|
 | `{{faker.name}}` | string | `"Mariana Lopes"` |
 | `{{faker.first_name}}` | string | `"Mariana"` |
 | `{{faker.last_name}}` | string | `"Lopes"` |
-| `{{faker.email}}` | string | `"mariana.lopes@gmail.com"` |
+| `{{faker.gender}}` | string | `"Female"` |
+| `{{faker.ssn}}` | string | `"296-62-1671"` |
+| `{{faker.job_title}}` | string | `"Senior Designer"` |
+| `{{faker.job_company}}` | string | `"Acme Corp"` |
 | `{{faker.username}}` | string | `"mariana423"` |
+| `{{faker.password}}` | string | `"xK3mP9qL2nRt"` |
+
+**Contato e internet**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
+| `{{faker.email}}` | string | `"mariana.lopes@gmail.com"` |
 | `{{faker.phone}}` | string | `"+55 11 91234-5678"` |
+| `{{faker.url}}` | string | `"https://example.com/path"` |
+| `{{faker.domain}}` | string | `"example.com"` |
+| `{{faker.ip}}` | string | `"192.168.1.42"` |
+| `{{faker.ipv6}}` | string | `"2001:db8::1"` |
+| `{{faker.mac}}` | string | `"a1:b2:c3:d4:e5:f6"` |
+| `{{faker.useragent}}` | string | `"Mozilla/5.0 ..."` |
+
+**Endereço**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
+| `{{faker.address}}` | string | `"123 Main St, Springfield"` |
+| `{{faker.street}}` | string | `"123 Main St"` |
+| `{{faker.city}}` | string | `"Springfield"` |
+| `{{faker.state}}` | string | `"Ohio"` |
+| `{{faker.country}}` | string | `"United States"` |
+| `{{faker.country_code}}` | string | `"US"` |
+| `{{faker.zip}}` | string | `"62701"` |
+| `{{faker.latitude}}` | float64 | `-23.55` |
+| `{{faker.longitude}}` | float64 | `-46.63` |
+
+**Finanças**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
+| `{{faker.price}}` | float64 | `149.90` |
+| `{{faker.currency}}` | string | `"BRL"` |
+| `{{faker.credit_card}}` | string | `"4111111111111111"` |
+| `{{faker.iban}}` | string | `"123456789012"` |
+| `{{faker.bitcoin}}` | string | `"1A2B3C4D..."` |
+
+**Cores e tech**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
+| `{{faker.color}}` | string | `"Crimson"` |
+| `{{faker.hex_color}}` | string | `"#e63946"` |
+| `{{faker.http_method}}` | string | `"POST"` |
+| `{{faker.http_status}}` | int | `200` |
+| `{{faker.mime_type}}` | string | `"pdf"` |
+| `{{faker.image_url}}` | string | `"https://picsum.photos/400/300"` |
+
+**Texto**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
 | `{{faker.word}}` | string | `"lorem"` |
-| `{{faker.sentence}}` | string | `"Lorem ipsum dolor amet consectetur."` |
+| `{{faker.sentence}}` | string | `"Lorem ipsum dolor amet."` |
+| `{{faker.paragraph}}` | string | `"Lorem ipsum dolor..."` |
+| `{{faker.lorem}}` | string | `"Lorem ipsum dolor sit amet."` |
+
+**Datas**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
+| `{{faker.date}}` | string | `"1994-07-22"` |
+| `{{faker.date_time}}` | string | `"1994-07-22T10:30:00Z"` |
+| `{{faker.future_date}}` | string | `"2027-01-15"` |
+| `{{faker.past_date}}` | string | `"2025-03-08"` |
+
+**IDs brasileiros**
+
+| Template | Tipo | Exemplo de saída |
+|---|---|---|
+| `{{faker.cpf}}` | string | `"123.456.789-09"` |
+| `{{faker.cnpj}}` | string | `"12.345.678/0001-90"` |
+| `{{faker.cep}}` | string | `"01310-100"` |
 
 ### Templates do body da request — `{{body.*}}`
 
@@ -425,9 +692,17 @@ Resposta gerada:
   "email": "{{faker.email}}",
   "username": "{{faker.username}}",
   "phone": "{{faker.phone}}",
+  "cpf": "{{faker.cpf}}",
+  "company": "{{faker.job_company}}",
+  "jobTitle": "{{faker.job_title}}",
+  "address": "{{faker.address}}",
+  "city": "{{faker.city}}",
+  "country": "{{faker.country_code}}",
+  "balance": "{{faker.price}}",
   "active": "{{rand.bool}}",
   "score": "{{rand.float}}",
   "createdAt": "{{now}}",
+  "birthDate": "{{faker.past_date}}",
   "bio": "{{faker.sentence}}"
 }
 ```
@@ -525,6 +800,82 @@ routes:
     delay: 10ms
 ```
 
+### Disparar requisições com dados faker
+
+Use `mockr request` para testar uma rota rapidamente sem precisar de curl ou Postman:
+
+```bash
+# GET simples
+./mockr request --config ./mock.yaml --path /products
+
+# POST com body faker gerado automaticamente
+./mockr request --config ./mock.yaml --path /products --method POST
+
+# 10 POSTs consecutivos, cada um com dados diferentes
+./mockr request --config ./mock.yaml --path /products --method POST --repeat 10
+```
+
+Para disparar contra sua API real (não o mock), use `--url`:
+
+```bash
+./mockr request --config ./mock.yaml \
+  --url http://minha-api.com/products \
+  --method POST \
+  --path /products
+```
+
+O body continua sendo lido do campo `body` da rota no config e os templates faker são resolvidos antes do envio.
+
+### Teste de carga com múltiplos usuários autenticados
+
+Simule N usuários simultâneos se autenticando e disparando requisições — cada um com seu próprio token, distribuídos aleatoriamente:
+
+**`mock.yaml`**
+```yaml
+auth:
+  url: http://minha-api.com/auth
+  method: POST
+  users: ./auth_users.json
+  extract: "data.token"
+  header: "Authorization"
+  prefix: "Bearer "
+
+routes:
+  - method: POST
+    path: /orders
+    response: ./order.json
+    body: ./order_body.json
+    status: 201
+    auth: true
+```
+
+**`auth_users.json`**
+```json
+[
+  { "username": "alice", "password": "pass_alice" },
+  { "username": "bob",   "password": "pass_bob"   },
+  { "username": "carol", "password": "pass_carol" }
+]
+```
+
+```bash
+# 3 usuários autenticados em paralelo, 100 requisições distribuídas aleatoriamente entre eles
+./mockr request --config ./mock.yaml --path /orders --method POST --repeat 100
+```
+
+Para um teste de fluxo completo com múltiplos endpoints e múltiplos usuários em paralelo, combine com shell script:
+
+```bash
+#!/bin/bash
+CONFIG="./mock.yaml"
+API="http://minha-api.com"
+
+./mockr request --config $CONFIG --url $API/orders  --method POST --path /orders  --repeat 50 &
+./mockr request --config $CONFIG --url $API/products --method POST --path /products --repeat 50 &
+./mockr request --config $CONFIG --url $API/users   --method GET  --path /users   --repeat 50 &
+wait
+```
+
 ### Stress test antes de integrar com a API real
 
 ```bash
@@ -534,6 +885,77 @@ routes:
 # Em outro terminal, rode o stress test
 ./mockr stress --url http://localhost:8080/products --method GET -n 2000 -c 100
 ```
+
+### Teste de fluxo paralelo com shell script
+
+A combinação de `mockr request --url` com shell script permite simular fluxos reais de uso de uma API com múltiplos endpoints sendo atingidos ao mesmo tempo — algo próximo do comportamento de uma aplicação em produção, onde usuários diferentes disparam operações distintas simultaneamente.
+
+Diferente do `mockr stress`, que bombardeia uma única rota para medir throughput, o teste de fluxo valida **comportamento sob carga distribuída**: autenticação, criação de recursos, consultas e deleções acontecendo em paralelo, cada chamada com um payload faker único gerado na hora.
+
+Isso ajuda a detectar problemas reais que testes sequenciais não revelam:
+
+- **Condições de corrida** — dois POSTs simultâneos disputando o mesmo recurso
+- **Degradação seletiva** — um endpoint lento impactando os demais por esgotamento de pool de conexões
+- **Falhas de validação sob carga** — regras de negócio que passam em chamadas únicas mas quebram quando o banco recebe volume
+- **Comportamento de cache** — endpoints de leitura que deveriam ser rápidos ficando lentos porque os de escrita estão saturando o banco
+
+**Exemplo de script:**
+
+```bash
+#!/bin/bash
+
+CONFIG="./mock.yaml"
+API="http://minha-api.com"
+REPEAT=50
+
+echo "=== iniciando teste de fluxo ==="
+echo ""
+
+# Todos os endpoints disparam em paralelo com & (background)
+./mockr request --config $CONFIG \
+  --url $API/users --method GET \
+  --repeat $REPEAT &
+
+./mockr request --config $CONFIG \
+  --url $API/users --method POST --path /users \
+  --repeat $REPEAT &
+
+./mockr request --config $CONFIG \
+  --url $API/products --method GET \
+  --repeat $REPEAT &
+
+./mockr request --config $CONFIG \
+  --url $API/products --method POST --path /products \
+  --repeat $REPEAT &
+
+./mockr request --config $CONFIG \
+  --url $API/orders --method POST --path /orders \
+  --repeat $REPEAT &
+
+# Aguarda todos os processos terminarem
+wait
+
+echo ""
+echo "=== teste concluído ==="
+```
+
+O `&` envia cada `mockr request` para background. O `wait` segura o script até o último processo terminar. Com 5 endpoints e `REPEAT=50`, são **250 requisições com payloads faker distintos** disparadas em paralelo — tudo isso com um único arquivo YAML como fonte de verdade.
+
+Para escalar, aumente o `REPEAT` ou adicione mais blocos. Para testar um fluxo de negócio específico — como criação de usuário seguida de criação de pedido — basta encadear os comandos com dependência explícita:
+
+```bash
+# Primeiro cria o usuário, depois dispara os pedidos em paralelo
+./mockr request --config $CONFIG --url $API/users --method POST --path /users --repeat 10
+wait
+
+./mockr request --config $CONFIG --url $API/orders --method POST --path /orders --repeat 50 &
+./mockr request --config $CONFIG --url $API/payments --method POST --path /payments --repeat 50 &
+wait
+```
+
+> Combine com `mockr stress` para os endpoints críticos: use o script de fluxo para aquecimento e o stress para medir o limite de cada rota individualmente.
+
+---
 
 ### Usar em CI/CD para testes automatizados
 

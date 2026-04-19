@@ -20,16 +20,31 @@ import (
 
 // Config representa o arquivo YAML inteiro.
 type Config struct {
-	Routes []Route `yaml:"routes"`
+	Auth   *AuthConfig `yaml:"auth"`
+	Routes []Route     `yaml:"routes"`
+}
+
+// AuthConfig define o fluxo de autenticação executado antes das rotas com auth: true.
+type AuthConfig struct {
+	URL     string `yaml:"url"`     // endpoint de autenticação
+	Method  string `yaml:"method"`  // método HTTP (padrão: POST)
+	Body    string `yaml:"body"`    // arquivo JSON de body para usuário único (suporta faker)
+	Users   string `yaml:"users"`   // arquivo JSON array para múltiplos usuários (substitui body)
+	Extract string `yaml:"extract"` // dot notation no response: "token", "data.access_token"
+	Header  string `yaml:"header"`  // header onde injetar o token: "Authorization", "X-Api-Key"
+	Prefix  string `yaml:"prefix"`  // prefixo antes do valor: "Bearer ", "Token ", ou vazio
 }
 
 // Route representa uma rota do mock.
 type Route struct {
-	Method       string        `yaml:"method"`
-	Path         string        `yaml:"path"`
-	ResponseFile string        `yaml:"response"` // caminho para o JSON de exemplo
-	StatusCode   int           `yaml:"status"`
-	Delay        time.Duration `yaml:"delay"` // ex: "100ms", "2s"
+	Method       string            `yaml:"method"`
+	Path         string            `yaml:"path"`
+	ResponseFile string            `yaml:"response"`
+	BodyFile     string            `yaml:"body"`    // JSON de body para POST/PUT/PATCH (suporta templates faker)
+	Headers      map[string]string `yaml:"headers"` // headers extras enviados pelo mockr request (suporta templates)
+	UseAuth      bool              `yaml:"auth"`    // se true, dispara o fluxo auth antes da requisição
+	StatusCode   int               `yaml:"status"`
+	Delay        time.Duration     `yaml:"delay"`
 }
 
 // ResponseBody armazena o JSON carregado do arquivo de exemplo.

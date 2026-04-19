@@ -40,6 +40,8 @@ func Run(args []string) error {
 		return runValidate(args[1:])
 	case "stress":
 		return runStress(args[1:])
+	case "request":
+		return runRequest(args[1:])
 	default:
 		return errors.New("comando desconhecido: " + args[0])
 	}
@@ -50,10 +52,12 @@ func printUsage() {
 mockr — servidor de mocks para desenvolvimento
 
 Uso:
-  mockr serve    --config <arquivo.yaml> [--port <porta>]              Sobe o servidor mock
-  mockr validate --config <arquivo.yaml>                               Valida o arquivo de config
-  mockr stress   --config <arquivo.yaml> [-n <reqs>] [-c <conc>]      Stress test (todas as rotas)
-  mockr stress   --url <url> --method <METHOD> [-n <reqs>] [-c <conc>] Stress test (URL externa)
+  mockr serve    --config <arquivo.yaml> [--port <porta>]                          Sobe o servidor mock
+  mockr validate --config <arquivo.yaml>                                           Valida o arquivo de config
+  mockr stress   --config <arquivo.yaml> [-n <reqs>] [-c <conc>]                  Stress test (todas as rotas)
+  mockr stress   --url <url> --method <METHOD> [-n <reqs>] [-c <conc>]            Stress test (URL externa)
+  mockr request  --config <arquivo.yaml> --path <path> [--method <METHOD>] [--repeat <n>]     Dispara contra o mock
+  mockr request  --config <arquivo.yaml> --url <url>  [--method <METHOD>] [--path <path>] [--repeat <n>]  Dispara contra URL externa
 
 Exemplos:
   mockr serve --config ./mock.yaml
@@ -61,6 +65,9 @@ Exemplos:
   mockr validate --config ./mock.yaml
   mockr stress --config ./mock.yaml -n 500 -c 20
   mockr stress --url http://localhost:9090/users --method GET -n 1000 -c 50
+  mockr request --config ./mock.yaml --path /users
+  mockr request --config ./mock.yaml --path /users --method POST --repeat 3
+  mockr request --config ./mock.yaml --url http://minha-api.com/users --method POST --path /users
 `)
 }
 

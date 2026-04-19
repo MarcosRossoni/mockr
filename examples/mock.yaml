@@ -1,4 +1,17 @@
+auth:
+  url: http://localhost:9999/auth
+  method: POST
+  users: ./examples/auth_users.json
+  extract: "data.token"
+  header: "Authorization"
+  prefix: "Bearer "
+
 routes:
+  - method: POST
+    path: /auth
+    response: ./examples/auth_response.json
+    status: 200
+
   - method: GET
     path: /users
     response: ./examples/users.json
@@ -13,5 +26,10 @@ routes:
   - method: POST
     path: /users
     response: ./examples/user_created.json
+    body: ./examples/user.json
     status: 201
     delay: 100ms
+    auth: true
+    headers:
+      X-Request-ID: "{{uuid}}"
+      X-Timestamp: "{{now.unix}}"

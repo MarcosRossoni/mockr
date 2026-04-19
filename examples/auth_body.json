@@ -1,0 +1,4 @@
+{
+  "username": "{{faker.username}}",
+  "password": "{{faker.password}}"
+}

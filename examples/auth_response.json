@@ -1,0 +1,6 @@
+{
+  "data": {
+    "token": "{{uuid}}",
+    "expires_in": 3600
+  }
+}
