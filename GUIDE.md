@@ -15,8 +15,9 @@ mockr é uma ferramenta de terminal para subir servidores HTTP mock durante o de
    - [stress](#stress)
    - [request](#request)
 5. [Templates dinâmicos](#templates-dinâmicos)
-6. [Interface TUI](#interface-tui)
-7. [Exemplos práticos](#exemplos-práticos)
+6. [Respostas de erro](#respostas-de-erro)
+7. [Interface TUI](#interface-tui)
+8. [Exemplos práticos](#exemplos-práticos)
 
 ---
 
@@ -159,6 +160,16 @@ Use `:nome` para criar segmentos dinâmicos:
 ```yaml
 path: /users/:id           # bate com /users/1, /users/abc, /users/xyz
 path: /orgs/:org/users/:id # bate com /orgs/acme/users/42
+```
+
+### Query params
+
+O roteador ignora query params ao fazer o match da rota — `/users?page=2` bate normalmente com a rota `/users`. Os parâmetros ficam disponíveis nos templates via `{{query.*}}`:
+
+```bash
+curl "http://localhost:8080/users?page=2&limit=10"
+# roteia para a rota GET /users
+# {{query.page}} → "2", {{query.limit}} → "10"
 ```
 
 ---
@@ -643,6 +654,14 @@ Quando um template está **embutido em texto**, o resultado é sempre string:
 | `{{faker.cnpj}}` | string | `"12.345.678/0001-90"` |
 | `{{faker.cep}}` | string | `"01310-100"` |
 
+**Contexto da request**
+
+| Template | Tipo | Descrição |
+|---|---|---|
+| `{{body.campo}}` | any | Valor do campo do body da request (POST/PUT/PATCH) |
+| `{{body.a.b}}` | any | Dot notation para campos aninhados |
+| `{{query.param}}` | string | Valor do query param da URL (qualquer método) |
+
 ### Templates do body da request — `{{body.*}}`
 
 Em requisições **POST, PUT e PATCH**, você pode espelhar campos do body enviado pelo cliente diretamente na resposta. Use `{{body.campo}}` para acessar qualquer campo do JSON recebido.
@@ -682,6 +701,38 @@ Resposta gerada:
 
 > `{{body.*}}` em GETs e DELETEs retorna string vazia — esses métodos não têm body.
 
+### Templates de query params — `{{query.*}}`
+
+Permite que a resposta reflita query parameters da URL. Funciona em qualquer método HTTP — ao contrário de `{{body.*}}`, que só opera em POST/PUT/PATCH.
+
+Use `{{query.nome_do_param}}` para acessar qualquer parâmetro da query string.
+
+**Exemplo:**
+
+Request — `GET /search?name=Claude&page=2`:
+
+`search_result.json`:
+```json
+{
+  "query": "{{query.name}}",
+  "page": "{{query.page}}",
+  "results": []
+}
+```
+
+Resposta gerada:
+```json
+{
+  "query": "Claude",
+  "page": "2",
+  "results": []
+}
+```
+
+> Se o parâmetro não estiver na URL, o template retorna string vazia.
+
+> `{{query.*}}` e `{{body.*}}` podem ser usados juntos na mesma resposta — por exemplo, em um POST com query params.
+
 ### Exemplo completo de JSON com templates
 
 ```json
@@ -708,6 +759,50 @@ Resposta gerada:
 ```
 
 Cada chamada a esse endpoint retorna um objeto diferente.
+
+---
+
+## Respostas de erro
+
+Quando o servidor não consegue atender uma requisição, retorna sempre um JSON estruturado com `Content-Type: application/json` — nunca texto puro. Isso facilita o tratamento de erros em clientes e testes automatizados.
+
+### Formato
+
+```json
+{ "error": "<mensagem descritiva>" }
+```
+
+### Casos e status codes
+
+| Situação | Status | Corpo |
+|---|---|---|
+| Path não existe no config | `404` | `{ "error": "route not found" }` |
+| Path existe mas método é diferente | `405` | `{ "error": "method not allowed" }` |
+| Falha ao renderizar o template de resposta | `500` | `{ "error": "error rendering response template" }` |
+
+**Exemplo — rota não encontrada:**
+
+```bash
+curl -i http://localhost:8080/naoexiste
+```
+```
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":"route not found"}
+```
+
+**Exemplo — método não permitido:**
+
+```bash
+curl -i -X DELETE http://localhost:8080/users
+```
+```
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json
+
+{"error":"method not allowed"}
+```
 
 ---
 

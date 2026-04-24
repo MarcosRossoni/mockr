@@ -117,21 +117,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 	start := time.Now()
 
+	// r.URL.Path não contém query params no http.Server do Go, mas fazemos o
+	// strip explicitamente para ser robusto a usos alternativos.
+	cleanPath, _, _ := strings.Cut(r.URL.Path, "?")
+
 	// Extrai o count opcional do prefixo da URL.
 	// GET /5/users  → path="/users", count=5
 	// POST /5/users → path="/users", count ignorado (não-GET)
 	// GET /users    → path="/users", count=0 (comportamento normal)
-	path, count := extractCount(r.URL.Path)
+	path, count := extractCount(cleanPath)
 	if !strings.EqualFold(r.Method, "GET") {
 		count = 0 // count só é significativo em GETs
 	}
 
-	// Lê o body da request uma única vez para métodos que podem enviar payload.
-	// Para GET/HEAD/DELETE o body é nil e os templates {{body.*}} retornam "".
-	var bodyCtx map[string]any
+	// Monta o contexto completo da request: body (POST/PUT/PATCH) + query params.
+	reqCtx := &engine.RequestContext{Query: r.URL.Query()}
 	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
 		if data, err := io.ReadAll(r.Body); err == nil && len(data) > 0 {
-			json.Unmarshal(data, &bodyCtx) //nolint:errcheck — body inválido simplesmente não popula o contexto
+			json.Unmarshal(data, &reqCtx.Body) //nolint:errcheck — body inválido simplesmente não popula o contexto
 		}
 	}
 
@@ -140,7 +143,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if matchPath(e.route.Path, path) {
 			pathMatched = true
 			if strings.EqualFold(r.Method, e.route.Method) {
-				serveRoute(rw, e.route, e.body, count, bodyCtx)
+				serveRoute(rw, e.route, e.body, count, reqCtx)
 				s.emit(r.Method, path, rw.status, time.Since(start))
 				return
 			}
@@ -148,11 +151,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pathMatched {
-		http.Error(rw, "método não permitido", http.StatusMethodNotAllowed)
+		writeJSONError(rw, http.StatusMethodNotAllowed, "method not allowed")
 	} else {
-		http.NotFound(rw, r)
+		writeJSONError(rw, http.StatusNotFound, "route not found")
 	}
 	s.emit(r.Method, path, rw.status, time.Since(start))
+}
+
+// writeJSONError escreve uma resposta de erro em JSON estruturado.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	body, _ := json.Marshal(map[string]string{"error": message})
+	w.Write(body) //nolint:errcheck
 }
 
 // extractCount verifica se o primeiro segmento do path é um inteiro positivo.
@@ -229,8 +240,8 @@ func matchPath(pattern, actual string) bool {
 
 // serveRoute aplica delay, renderiza templates e escreve a resposta HTTP.
 // count > 0 em GETs: retorna um array JSON com count itens gerados dinamicamente.
-// bodyCtx contém os campos do body da request para resolução de {{body.*}}.
-func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody, count int, bodyCtx map[string]any) {
+// reqCtx contém body e query params da request para resolução de {{body.*}} e {{query.*}}.
+func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody, count int, reqCtx *engine.RequestContext) {
 	if r.Delay > 0 {
 		time.Sleep(r.Delay)
 	}
@@ -241,11 +252,11 @@ func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody
 	if count > 0 {
 		out, err = renderMany(body.Raw, count)
 	} else {
-		out, err = engine.RenderJSONWithContext(body.Raw, bodyCtx)
+		out, err = engine.RenderJSONWithRequestCtx(body.Raw, reqCtx)
 	}
 
 	if err != nil {
-		http.Error(w, "erro ao serializar resposta", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "error rendering response template")
 		return
 	}
 
