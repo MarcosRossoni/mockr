@@ -20,8 +20,16 @@ import (
 
 // Config representa o arquivo YAML inteiro.
 type Config struct {
-	Auth   *AuthConfig `yaml:"auth"`
-	Routes []Route     `yaml:"routes"`
+	Auth   *AuthConfig   `yaml:"auth"`
+	Crypto *CryptoConfig `yaml:"crypto"`
+	Routes []Route       `yaml:"routes"`
+}
+
+// CryptoConfig define as chaves RSA usadas para criptografia/descriptografia de requests e responses.
+// Os campos public_key e private_key aceitam caminho para arquivo PEM ou string PEM inline.
+type CryptoConfig struct {
+	PublicKey  string `yaml:"public_key"`  // chave pública RSA (arquivo .pem ou PEM inline)
+	PrivateKey string `yaml:"private_key"` // chave privada RSA (arquivo .pem ou PEM inline)
 }
 
 // AuthConfig define o fluxo de autenticação executado antes das rotas com auth: true.
@@ -37,14 +45,16 @@ type AuthConfig struct {
 
 // Route representa uma rota do mock.
 type Route struct {
-	Method       string            `yaml:"method"`
-	Path         string            `yaml:"path"`
-	ResponseFile string            `yaml:"response"`
-	BodyFile     string            `yaml:"body"`    // JSON de body para POST/PUT/PATCH (suporta templates faker)
-	Headers      map[string]string `yaml:"headers"` // headers extras enviados pelo mockr request (suporta templates)
-	UseAuth      bool              `yaml:"auth"`    // se true, dispara o fluxo auth antes da requisição
-	StatusCode   int               `yaml:"status"`
-	Delay        time.Duration     `yaml:"delay"`
+	Method          string            `yaml:"method"`
+	Path            string            `yaml:"path"`
+	ResponseFile    string            `yaml:"response"`
+	BodyFile        string            `yaml:"body"`             // JSON de body para POST/PUT/PATCH (suporta templates faker)
+	Headers         map[string]string `yaml:"headers"`          // headers extras enviados pelo mockr request (suporta templates)
+	UseAuth         bool              `yaml:"auth"`             // se true, dispara o fluxo auth antes da requisição
+	DecryptRequest  bool              `yaml:"decrypt_request"`  // descriptografa o body da request antes de processar templates
+	EncryptResponse bool              `yaml:"encrypt_response"` // criptografa a resposta antes de enviar ao cliente
+	StatusCode      int               `yaml:"status"`
+	Delay           time.Duration     `yaml:"delay"`
 }
 
 // ResponseBody armazena o JSON carregado do arquivo de exemplo.

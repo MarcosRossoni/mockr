@@ -3,6 +3,7 @@ package server
 // Package server: sobe o servidor HTTP e registra as rotas definidas no YAML.
 
 import (
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"mockr/config"
+	"mockr/cryptoutil"
 	"mockr/engine"
 )
 
@@ -56,8 +58,10 @@ type routeEntry struct {
 // Server mantém a lista de rotas, a porta escolhida e um canal de eventos.
 // Implementa http.Handler para poder ser passado ao http.ListenAndServe.
 type Server struct {
-	routes []routeEntry
-	port   int
+	routes  []routeEntry
+	port    int
+	pubKey  *rsa.PublicKey  // nil quando não há bloco crypto no YAML
+	privKey *rsa.PrivateKey // nil quando não há bloco crypto no YAML
 	// Events recebe um RequestLog a cada requisição atendida.
 	// Bufferizado para não bloquear o handler HTTP se o consumidor estiver lento.
 	Events chan RequestLog
@@ -77,6 +81,23 @@ func New(cfg *config.Config, port int) (*Server, error) {
 	s := &Server{
 		port:   port,
 		Events: make(chan RequestLog, 64),
+	}
+
+	if cfg.Crypto != nil {
+		if cfg.Crypto.PublicKey != "" {
+			pubKey, err := cryptoutil.LoadPublicKey(cfg.Crypto.PublicKey)
+			if err != nil {
+				return nil, fmt.Errorf("crypto.public_key inválida: %w", err)
+			}
+			s.pubKey = pubKey
+		}
+		if cfg.Crypto.PrivateKey != "" {
+			privKey, err := cryptoutil.LoadPrivateKey(cfg.Crypto.PrivateKey)
+			if err != nil {
+				return nil, fmt.Errorf("crypto.private_key inválida: %w", err)
+			}
+			s.privKey = privKey
+		}
 	}
 
 	for _, route := range cfg.Routes {
@@ -130,12 +151,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		count = 0 // count só é significativo em GETs
 	}
 
-	// Monta o contexto completo da request: body (POST/PUT/PATCH) + query params.
-	reqCtx := &engine.RequestContext{Query: r.URL.Query()}
+	// Lê os bytes brutos do body uma única vez — o io.Reader é consumível apenas uma vez.
+	var rawBody []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-		if data, err := io.ReadAll(r.Body); err == nil && len(data) > 0 {
-			json.Unmarshal(data, &reqCtx.Body) //nolint:errcheck — body inválido simplesmente não popula o contexto
-		}
+		rawBody, _ = io.ReadAll(r.Body)
 	}
 
 	pathMatched := false
@@ -143,7 +162,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if matchPath(e.route.Path, path) {
 			pathMatched = true
 			if strings.EqualFold(r.Method, e.route.Method) {
-				serveRoute(rw, e.route, e.body, count, reqCtx)
+				// Monta o contexto da request com query params; body preenchido abaixo.
+				reqCtx := &engine.RequestContext{Query: r.URL.Query()}
+
+				bodyData := rawBody
+				// Se a rota pede decrypt, tenta descriptografar antes de parsear o JSON.
+				if e.route.DecryptRequest && s.privKey != nil && len(rawBody) > 0 {
+					if decrypted, err := cryptoutil.Decrypt(string(rawBody), s.privKey); err == nil {
+						bodyData = []byte(decrypted)
+					}
+					// Em caso de falha no decrypt usa o body original (não bloqueia o handler).
+				}
+
+				if len(bodyData) > 0 {
+					json.Unmarshal(bodyData, &reqCtx.Body) //nolint:errcheck
+				}
+
+				serveRoute(rw, e.route, e.body, count, reqCtx, s.pubKey)
 				s.emit(r.Method, path, rw.status, time.Since(start))
 				return
 			}
@@ -241,7 +276,8 @@ func matchPath(pattern, actual string) bool {
 // serveRoute aplica delay, renderiza templates e escreve a resposta HTTP.
 // count > 0 em GETs: retorna um array JSON com count itens gerados dinamicamente.
 // reqCtx contém body e query params da request para resolução de {{body.*}} e {{query.*}}.
-func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody, count int, reqCtx *engine.RequestContext) {
+// pubKey é usada quando a rota tem encrypt_response: true; pode ser nil.
+func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody, count int, reqCtx *engine.RequestContext, pubKey *rsa.PublicKey) {
 	if r.Delay > 0 {
 		time.Sleep(r.Delay)
 	}
@@ -257,6 +293,19 @@ func serveRoute(w http.ResponseWriter, r config.Route, body *config.ResponseBody
 
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "error rendering response template")
+		return
+	}
+
+	// Criptografa a resposta se solicitado — envia o payload base64 como text/plain.
+	if r.EncryptResponse && pubKey != nil {
+		encrypted, err := cryptoutil.Encrypt(string(out), pubKey)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "error encrypting response")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(r.StatusCode)
+		w.Write([]byte(encrypted)) //nolint:errcheck
 		return
 	}
 

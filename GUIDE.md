@@ -14,10 +14,12 @@ mockr é uma ferramenta de terminal para subir servidores HTTP mock durante o de
    - [validate](#validate)
    - [stress](#stress)
    - [request](#request)
-5. [Templates dinâmicos](#templates-dinâmicos)
-6. [Respostas de erro](#respostas-de-erro)
-7. [Interface TUI](#interface-tui)
-8. [Exemplos práticos](#exemplos-práticos)
+   - [decrypt / encrypt](#decrypt--encrypt)
+5. [Criptografia RSA](#criptografia-rsa)
+6. [Templates dinâmicos](#templates-dinâmicos)
+7. [Respostas de erro](#respostas-de-erro)
+8. [Interface TUI](#interface-tui)
+9. [Exemplos práticos](#exemplos-práticos)
 
 ---
 
@@ -469,6 +471,229 @@ POST http://localhost:52981/users  →  201  (102ms)
 ```
 
 O status é colorido: verde para 2xx, amarelo para 3xx, vermelho para 4xx/5xx.
+
+---
+
+### decrypt / encrypt
+
+Utilitários para inspecionar e gerar payloads criptografados, compatíveis com a lógica Java legada (`URLEncode → RSA/PKCS1v15 chunks → Base64`).
+
+**decrypt** — recebe um payload base64/RSA e exibe o JSON descriptografado com indentação:
+
+```bash
+./mockr decrypt --config ./mock.yaml --text "SGVsbG8gV29ybGQ..."
+```
+
+**encrypt** — recebe um JSON plaintext e exibe o payload base64 pronto para envio:
+
+```bash
+./mockr encrypt --config ./mock.yaml --text '{"id":1,"name":"Marco"}'
+```
+
+| Flag | Obrigatório | Descrição |
+|---|---|---|
+| `--config` | Sim | Arquivo YAML com o bloco `crypto` configurado |
+| `--text` | Sim | Payload a processar — base64 para `decrypt`; JSON para `encrypt` |
+
+Pré-requisito no YAML:
+- `decrypt` → precisa de `crypto.private_key`
+- `encrypt` → precisa de `crypto.public_key`
+
+---
+
+## Criptografia RSA
+
+O mockr suporta criptografia RSA compatível com a implementação Java legada. A sequência de operações espelha exatamente o que o Java executa:
+
+| Operação | Java | mockr (Go) |
+|---|---|---|
+| Encode antes de criptografar | `URLEncoder.encode(json, UTF-8)` | `url.QueryEscape` |
+| Encrypt em chunks | `cipher.doFinal(data, offset, len)` com PKCS1v15 | `rsa.EncryptPKCS1v15` em loop |
+| Encode final | `Base64.getEncoder().encodeToString` | `base64.StdEncoding` |
+| Chunk encrypt | `ENCRYPT_CHUNK_SIZE` (ex: 245) | `keySize - 11` (calculado da chave) |
+| Chunk decrypt | `DECRYPT_CHUNK_SIZE` (ex: 256) | `keySize` (calculado da chave) |
+
+O tamanho dos chunks é derivado automaticamente do tamanho da chave — sem necessidade de configuração manual.
+
+### Configuração no YAML
+
+```yaml
+crypto:
+  public_key: ./keys/public.pem    # chave pública — usada por encrypt_response e mockr encrypt
+  private_key: ./keys/private.pem  # chave privada — usada por decrypt_request e mockr decrypt
+
+routes:
+  - method: POST
+    path: /api/pagamentos
+    response: ./examples/pagamento.json
+    status: 200
+    decrypt_request: true    # body recebido (base64) é descriptografado antes de processar {{body.*}}
+    encrypt_response: true   # resposta JSON é criptografada e enviada como base64 (Content-Type: text/plain)
+```
+
+Os campos `public_key` e `private_key` aceitam dois formatos:
+- **Caminho de arquivo** — relativo ao diretório onde `mockr` é executado (ex: `./keys/public.pem`)
+- **PEM inline** — string PEM colada diretamente no YAML, detectada pelo prefixo `-----BEGIN`
+
+### Flags por rota
+
+| Flag | Requer | Descrição |
+|---|---|---|
+| `decrypt_request: true` | `crypto.private_key` | Descriptografa o body da request (base64 → JSON) antes de processar templates `{{body.*}}` |
+| `encrypt_response: true` | `crypto.public_key` | Criptografa a resposta JSON (JSON → base64) antes de enviar. `Content-Type` muda para `text/plain` |
+
+Quando `decrypt_request` falha (payload inválido ou chave errada), o body original é usado sem modificação — o handler não retorna erro para não bloquear o fluxo.
+
+### Formato dos arquivos PEM
+
+Arquivos PEM são texto puro com cabeçalho, conteúdo em Base64 e rodapé. O mockr detecta automaticamente os formatos abaixo.
+
+---
+
+**Chave pública — PKIX / SubjectPublicKeyInfo** (`-----BEGIN PUBLIC KEY-----`)
+
+Formato padrão gerado pelo Java (`KeyFactory`, `X509EncodedKeySpec`) e pelo OpenSSL. Recomendado para interoperabilidade.
+
+```
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwRydvlAy+hAmWHNjIVfY
+o9zaul6+2aqI1g4xXjYX1rrl/bzvMj0snznLV2elgjRv80qLuNX2sSJGu2t+EHfH
+GAbcwVZLbsfstEpmB2Cjghnd2DPudOc3e6oSQmrhqB6/1xIjBbwvjjJmXjHgCb1X
+tXHXXcblm1XhlIT/RKuVC6zorrCHyzpnFFIdASYCaIpXQ/uHUg+YgAMIvEAgLl3B
+eaJS8QkplA1KS3Vya2TzPBnFZlPwW8LRoB0jTIztLVIE+KAc0pqebdHK2KA5LmOD
+gJPYtT6fY1ea3VyuWih4h4fOSt7SswfkGehY/r0OfLwrr4F0fIi52eFzliD4AlkL
+awIDAQAB
+-----END PUBLIC KEY-----
+```
+
+> **Atenção:** a chave acima é um exemplo gerado para ilustração de formato — não a utilize em produção.
+
+---
+
+**Chave privada — PKCS8** (`-----BEGIN PRIVATE KEY-----`)
+
+Formato moderno, gerado por Java (`PKCS8EncodedKeySpec`) e pelo OpenSSL com `-pkcs8`. Suportado pelo mockr com prioridade sobre PKCS1.
+
+```
+-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDBHJ2+UDL6ECZY
+c2MhV9ij3Nq6Xr7ZqojWDjFeNhfWuuX9vO8yPSyfOctXZ6WCNG/zSou41faxIka7
+a34Qd8cYBtzBVktux+y0SmYHYKOCGd3YM+505zd7qhJCauGoHr/XEiMFvC+OMmZe
+MeAJvVe1cdddxuWbVeGUhP9Eq5ULrOiusIfLOmcUUh0BJgJoildD+4dSD5iAAwi8
+QCAuXcF5olLxCSmUDUpLdXJrZPM8GcVmU/BbwtGgHSNMjO0tUgT4oBzSmp5t0crY
+oDkuY4OAk9i1Pp9jV5rdXK5aKHiHh85K3tKzB+QZ6Fj+vQ58vCuvgXR8iLnZ4XOW
+IPgCWQtrAgMBAAECggEAGSjbynBTe+3/uPVrnGwADzVWkAKJFf3Ybx8RQoeEqpbW
+IS1s8pwyxJn4iq43y5N+ZHG5a38A8YoYMhHqrkWUvGYke9H86PWGOuUYjuyB0REC
+rMjzT+rR+TwqvdmEBe3fq6sywewHPB0H5kzUNiCjnUG0QAUKZCcXyUxcn7tFI2yM
+uCc1RsrJxFE/scEsLbhQG79DDPdOu3B70Vb9lkdJ5uxIOg5ROmNS0we7OtR1zyyo
+vN1vKWuC1kz3tK4jqMlQvpOdNmOgBxrQDTW5pvXLFUp7xQEzAX/hAWC0SWd77NOg
+yWXYmWVl8DhZX494QAOGO8lrGxL+DN6SCZWICeOXjQKBgQD+1qKLr9rRWMGV4xgH
+zakGk5177ZU4qmDrdWe+5BS+WvgLCMGMg3kD45AUY/QN7yDUJiTyYS/641gdWVUH
+qK9iU7H3Qu4lwSj970IKbAmZwaSTks3O7gUnTcf4LYeWbVX3LaJAC4TOY+1jeN0u
+zF87DCanfsCO9I3td9BbxvoLhQKBgQDB/fQwAWg7nntQtxnWuE69NNiWHJX3eawm
+i+JZ6BVZGfPWPGwnI9dLBwXf9BysKo3hPVwwXh+FW3gqIjwJ8sJmcaaKmZZsFxWw
+l9LvpE+gxHqy5f+K5PpZf7qtvwWNaMaIJ/8BVw5LpQgtov3YqJ6XwziI40ZnA3gq
+HU71JT2WLwKBgFZyyUFJrplF2qXWG9jJ04T/nnTj67MFWUuG0GLZTJAmm+5iUgYw
+s2S2VbIVFj2D2UceiXoPrg8WAFY0b7vhZV2dtsmCUvdLx3QdLfILJFaccg/9xQNl
+iyoCIMv35f8JqBfpyxiez7aT/3u3DJFLkyKcxKAdR4U3QM5FztDTdw9hAoGBAIO+
+0IN5sSwsKVtbvnSQnwjoRt9Lcp2rSDq1bXfZogXtFig8yMacFK6jil3aD07tZ4W8
+gktm4MlUoXsb3OJ0t4mTTaN7QykNVHGl6l9Nm7Z3OU0d3jqZ31vA3yr4O/EZYxs8
+7nYehVriLXew5eyqN2qh7lco4rs7I/SWCvV54SWJAoGAVVuqn0lNwqBO7ngVqO5t
+6sjDh6U0AouT9lpmhUIeITrBRgEl40v2ytrrSJB/4AymNHSz6GnKTX7drhpUV+zE
+1ISBdT4TTRhSGX5dWSbc9S28zgHf1TZlJNbkvgH0SF6bZm3w5N/5r/Q17OZlRz2Y
+oQwQvj05CNC+iuDXSsbQ/dQ=
+-----END PRIVATE KEY-----
+```
+
+> **Atenção:** a chave acima é um exemplo gerado para ilustração de formato — não a utilize em produção.
+
+---
+
+**Chave privada — PKCS1 / formato legado RSA** (`-----BEGIN RSA PRIVATE KEY-----`)
+
+Formato mais antigo, gerado pelo OpenSSL sem a flag `-pkcs8`. Ainda comum em aplicações legadas. Também suportado pelo mockr como fallback.
+
+```
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAwRydvlAy+hAmWHNjIVfYo9zaul6+2aqI1g4xXjYX1rrl/bzv
+Mj0snznLV2elgjRv80qLuNX2sSJGu2t+EHfHGAbcwVZLbsfstEpmB2Cjghnd2DPu
+dOc3e6oSQmrhqB6/1xIjBbwvjjJmXjHgCb1XtXHXXcblm1XhlIT/RKuVC6zorrCH
+yzpnFFIdASYCaIpXQ/uHUg+YgAMIvEAgLl3BeaJS8QkplA1KS3Vya2TzPBnFZlPw
+W8LRoB0jTIztLVIE+KAc0pqebdHK2KA5LmODgJPYtT6fY1ea3VyuWih4h4fOSt7S
+swfkGehY/r0OfLwrr4F0fIi52eFzliD4AlkLawIDAQABAoIBABko28pwU3vt/7j1
+a5xsAA81VpACiRX92G8fEUKHhKqW1iEtbPKcMsSZ+IquN8uTfmRxuWt/APGKGDIR
+6q5FlLxmJHvR/Oj1hjrlGI7sgdERAqzI80/q0fk8Kr3ZhAXt36urMsHsBzwdB+ZM
+1DYgo51BtEAFCmQnF8lMXJ+7RSNsjLgnNUbKycRRP7HBLC24UBu/Qwz3Trtwe9FW
+/ZZHSebsSDoOUTpjUtMHuzrUdc8sqLzdbylrgtZM97SuI6jJUL6TnTZjoAca0A01
+uab1yxVKe8UBMwF/4QFgtElne+zToMll2JllZfA4WV+PeEADhjvJaxsS/gzekgmV
+iAnjl40CgYEA/taii6/a0VjBleMYB82pBpOde+2VOKpg63VnvuQUvlr4CwjBjIN5
+A+OQFGP0De8g1CYk8mEv+uNYHVlVB6ivYlOx90LuJcEo/e9CCmwJmcGkk5LNzu4F
+J03H+C2Hlm1V9y2iQAuEzmPtY3jdLsxfOwwmp37AjvSN7XfQW8b6C4UCgYEAwf30
+MAFoO557ULcZ1rhOvTTYlhyV93msJoviWegVWRnz1jxsJyPXSwcF3/QcrCqN4T1c
+MF4fhVt4KiI8CfLCZnGmipmWbBcVsJfS76RPoMR6suX/iuT6WX+6rb8FjWjGiCf/
+AVcOS6UILaL92Kiel8M4iONGZwN4Kh1O9SU9li8CgYBWcslBSa6ZRdql1hvYydOE
+/5504+uzBVlLhtBi2UyQJpvuYlIGMLNktlWyFRY9g9lHHol6D64PFgBWNG+74WVd
+nbbJglL3S8d0HS3yCyRWnHIP/cUDZYsqAiDL9+X/CagX6csYns+2k/97twyRS5Mi
+nMSgHUeFN0DORc7Q03cPYQKBgQCDvtCDebEsLClbW750kJ8I6EbfS3Kdq0g6tW13
+2aIF7RYoPMjGnBSuo4pd2g9O7WeFvIJLZuDJVKF7G9zidLeJk02je0MpDVRxpepf
+TZu2dzlNHd46md9bwN8q+DvxGWMbPO52HoVa4i13sOXsqjdqoe5XKOK7OyP0lgr1
+eeEliQKBgFVbqp9JTcKgTu54FajuberIw4elNAKLk/ZaZoVCHiE6wUYBJeNL9sra
+60iQf+AMpjR0s+hpyk1+3a4aVFfsxNSEgXU+E00YUhl+XVkm3PUtvM4B39U2ZSTW
+5L4B9Ehem2Zt8OTf+a/0NezmZUc9mKEMEL49OQjQvorg10rG0P3U
+-----END RSA PRIVATE KEY-----
+```
+
+> **Atenção:** a chave acima é um exemplo gerado para ilustração de formato — não a utilize em produção.
+
+### Gerar um par de chaves para teste
+
+Use o OpenSSL (disponível em macOS, Linux e WSL):
+
+```bash
+# Cria o diretório de chaves
+mkdir -p keys
+
+# Gera a chave privada RSA 2048-bit no formato PKCS8 (compatível com Java moderno)
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem
+
+# Extrai a chave pública correspondente no formato PKIX
+openssl pkey -pubout -in keys/private.pem -out keys/public.pem
+```
+
+Para gerar no formato legado PKCS1 (se a aplicação Java usar `RSAPrivateKey` / `PKCS1EncodedKeySpec`):
+
+```bash
+# Chave privada no formato PKCS1 (header: -----BEGIN RSA PRIVATE KEY-----)
+openssl genrsa -out keys/private_pkcs1.pem 2048
+
+# Chave pública correspondente (formato PKIX — mesmo resultado)
+openssl rsa -pubout -in keys/private_pkcs1.pem -out keys/public.pem
+```
+
+> O mockr detecta o formato automaticamente pelo cabeçalho do arquivo — `-----BEGIN PRIVATE KEY-----` (PKCS8) ou `-----BEGIN RSA PRIVATE KEY-----` (PKCS1). Não é necessário configurar o formato manualmente.
+
+### Verificar a compatibilidade com a aplicação Java
+
+Gere um payload com o mockr e tente descriptografar com a chave privada da aplicação Java (ou vice-versa):
+
+```bash
+# 1. Criptografa um JSON de teste com a chave pública
+./mockr encrypt --config ./mock.yaml --text '{"nome":"Marco","valor":1500.00}'
+
+# Saída (exemplo):
+# SGVsbG8gV29ybGQhLi4u...
+
+# 2. Descriptografa o mesmo payload para confirmar o round-trip
+./mockr decrypt --config ./mock.yaml --text "SGVsbG8gV29ybGQhLi4u..."
+
+# Saída esperada:
+# {
+#   "nome": "Marco",
+#   "valor": 1500.00
+# }
+```
+
+Se a aplicação Java consegue descriptografar o payload gerado pelo `mockr encrypt`, e o `mockr decrypt` consegue ler os payloads gerados pelo Java, a compatibilidade está confirmada.
 
 ---
 

@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"mockr/config"
+	"mockr/cryptoutil"
 	"mockr/server"
 	"mockr/stress"
 	"mockr/tui"
@@ -42,6 +43,10 @@ func Run(args []string) error {
 		return runStress(args[1:])
 	case "request":
 		return runRequest(args[1:])
+	case "decrypt":
+		return runDecrypt(args[1:])
+	case "encrypt":
+		return runEncrypt(args[1:])
 	default:
 		return errors.New("comando desconhecido: " + args[0])
 	}
@@ -52,12 +57,14 @@ func printUsage() {
 mockr — servidor de mocks para desenvolvimento
 
 Uso:
-  mockr serve    --config <arquivo.yaml> [--port <porta>]                          Sobe o servidor mock
-  mockr validate --config <arquivo.yaml>                                           Valida o arquivo de config
-  mockr stress   --config <arquivo.yaml> [-n <reqs>] [-c <conc>]                  Stress test (todas as rotas)
-  mockr stress   --url <url> --method <METHOD> [-n <reqs>] [-c <conc>]            Stress test (URL externa)
-  mockr request  --config <arquivo.yaml> --path <path> [--method <METHOD>] [--repeat <n>]     Dispara contra o mock
-  mockr request  --config <arquivo.yaml> --url <url>  [--method <METHOD>] [--path <path>] [--repeat <n>]  Dispara contra URL externa
+  mockr serve    --config <arquivo.yaml> [--port <porta>]                                     Sobe o servidor mock
+  mockr validate --config <arquivo.yaml>                                                      Valida o arquivo de config
+  mockr stress   --config <arquivo.yaml> [-n <reqs>] [-c <conc>]                             Stress test (todas as rotas)
+  mockr stress   --url <url> --method <METHOD> [-n <reqs>] [-c <conc>]                       Stress test (URL externa)
+  mockr request  --config <arquivo.yaml> --path <path> [--method <METHOD>] [--repeat <n>]    Dispara contra o mock
+  mockr request  --config <arquivo.yaml> --url <url>  [--method <METHOD>] [--path <path>]    Dispara contra URL externa
+  mockr decrypt  --config <arquivo.yaml> --text <payload_base64>                             Descriptografa payload RSA
+  mockr encrypt  --config <arquivo.yaml> --text <json_plaintext>                             Criptografa JSON com RSA
 
 Exemplos:
   mockr serve --config ./mock.yaml
@@ -68,6 +75,8 @@ Exemplos:
   mockr request --config ./mock.yaml --path /users
   mockr request --config ./mock.yaml --path /users --method POST --repeat 3
   mockr request --config ./mock.yaml --url http://minha-api.com/users --method POST --path /users
+  mockr decrypt --config ./mock.yaml --text "SGVsbG8gV29ybGQ="
+  mockr encrypt --config ./mock.yaml --text '{"id":1,"name":"Marco"}'
 `)
 }
 
@@ -239,6 +248,78 @@ func runValidate(args []string) error {
 
 	fmt.Println("✓ config válida")
 	fmt.Print(cfg.Summary())
+	return nil
+}
+
+// runDecrypt descriptografa um payload base64/RSA usando a chave privada definida no YAML.
+// Útil para inspecionar requests e responses de APIs Java legadas em tempo de depuração.
+//
+// Uso: mockr decrypt --config ./mock.yaml --text "base64encodedpayload"
+func runDecrypt(args []string) error {
+	configPath, err := parseFlag(args, "--config")
+	if err != nil {
+		return fmt.Errorf("decrypt requer --config: %w", err)
+	}
+	cipherText, err := parseFlag(args, "--text")
+	if err != nil {
+		return fmt.Errorf("decrypt requer --text: %w", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("config inválida: %w", err)
+	}
+	if cfg.Crypto == nil || cfg.Crypto.PrivateKey == "" {
+		return fmt.Errorf("decrypt requer o bloco crypto.private_key no YAML")
+	}
+
+	privKey, err := cryptoutil.LoadPrivateKey(cfg.Crypto.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("erro ao carregar chave privada: %w", err)
+	}
+
+	plainText, err := cryptoutil.Decrypt(cipherText, privKey)
+	if err != nil {
+		return fmt.Errorf("erro ao descriptografar: %w", err)
+	}
+
+	fmt.Println(cryptoutil.PrettyJSON(plainText))
+	return nil
+}
+
+// runEncrypt criptografa um JSON plaintext usando a chave pública definida no YAML.
+// Útil para gerar payloads de teste compatíveis com APIs Java legadas.
+//
+// Uso: mockr encrypt --config ./mock.yaml --text '{"id":1,"name":"Marco"}'
+func runEncrypt(args []string) error {
+	configPath, err := parseFlag(args, "--config")
+	if err != nil {
+		return fmt.Errorf("encrypt requer --config: %w", err)
+	}
+	plainText, err := parseFlag(args, "--text")
+	if err != nil {
+		return fmt.Errorf("encrypt requer --text: %w", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("config inválida: %w", err)
+	}
+	if cfg.Crypto == nil || cfg.Crypto.PublicKey == "" {
+		return fmt.Errorf("encrypt requer o bloco crypto.public_key no YAML")
+	}
+
+	pubKey, err := cryptoutil.LoadPublicKey(cfg.Crypto.PublicKey)
+	if err != nil {
+		return fmt.Errorf("erro ao carregar chave pública: %w", err)
+	}
+
+	cipherText, err := cryptoutil.Encrypt(plainText, pubKey)
+	if err != nil {
+		return fmt.Errorf("erro ao criptografar: %w", err)
+	}
+
+	fmt.Println(cipherText)
 	return nil
 }
 
