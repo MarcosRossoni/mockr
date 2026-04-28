@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,9 +13,15 @@ import (
 	"time"
 
 	"mockr/config"
+	"mockr/cryptoutil"
 	"mockr/engine"
 	"mockr/server"
 )
+
+type encryptOpts struct {
+	pubKey    *rsa.PublicKey
+	wrapField string // vazio = base64 puro (text/plain); não vazio = {"<campo>": "<base64>"} (application/json)
+}
 
 func runRequest(args []string) error {
 	configPath, err := parseFlag(args, "--config")
@@ -48,6 +55,7 @@ func runRequest(args []string) error {
 
 	var bodyTemplate any
 	baseHeaders := make(map[string]string)
+	var enc *encryptOpts
 
 	var authTokens []string
 	var authLabels []string
@@ -60,6 +68,16 @@ func runRequest(args []string) error {
 				return fmt.Errorf("erro ao ler body da rota: %w", err)
 			}
 			bodyTemplate = rb.Raw
+		}
+		if route.EncryptBody {
+			if cfg.Crypto == nil || cfg.Crypto.PublicKey == "" {
+				return fmt.Errorf("rota usa encrypt_body: true mas nenhuma crypto.public_key está definida no config")
+			}
+			pubKey, err := cryptoutil.LoadPublicKey(cfg.Crypto.PublicKey)
+			if err != nil {
+				return fmt.Errorf("erro ao carregar chave pública para encrypt_body: %w", err)
+			}
+			enc = &encryptOpts{pubKey: pubKey, wrapField: route.EncryptBodyWrap}
 		}
 		for k, v := range route.Headers {
 			baseHeaders[k] = v
@@ -123,7 +141,7 @@ func runRequest(args []string) error {
 			}
 		}
 
-		if err := fireRequest(method, url, bodyTemplate, iterHeaders); err != nil {
+		if err := fireRequest(method, url, bodyTemplate, iterHeaders, enc); err != nil {
 			fmt.Printf("  erro: %v\n", err)
 		}
 
@@ -135,15 +153,33 @@ func runRequest(args []string) error {
 	return nil
 }
 
-func fireRequest(method, url string, bodyTemplate any, headers map[string]string) error {
+func fireRequest(method, url string, bodyTemplate any, headers map[string]string, enc *encryptOpts) error {
 	var reqBody io.Reader
+	var contentType string
 
 	if bodyTemplate != nil {
 		rendered, err := engine.RenderJSON(bodyTemplate)
 		if err != nil {
 			return fmt.Errorf("erro ao renderizar body: %w", err)
 		}
-		reqBody = bytes.NewReader(rendered)
+
+		if enc != nil {
+			encrypted, err := cryptoutil.Encrypt(string(rendered), enc.pubKey)
+			if err != nil {
+				return fmt.Errorf("erro ao criptografar body: %w", err)
+			}
+			if enc.wrapField != "" {
+				wrapped, _ := json.Marshal(map[string]string{enc.wrapField: encrypted})
+				reqBody = bytes.NewReader(wrapped)
+				contentType = "application/json"
+			} else {
+				reqBody = bytes.NewReader([]byte(encrypted))
+				contentType = "text/plain; charset=utf-8"
+			}
+		} else {
+			reqBody = bytes.NewReader(rendered)
+			contentType = "application/json"
+		}
 	}
 
 	req, err := http.NewRequest(method, url, reqBody)
@@ -151,7 +187,7 @@ func fireRequest(method, url string, bodyTemplate any, headers map[string]string
 		return err
 	}
 	if bodyTemplate != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 
 	resolvedHeaders := make(map[string]string, len(headers))

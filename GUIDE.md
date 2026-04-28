@@ -16,6 +16,9 @@ mockr é uma ferramenta de terminal para subir servidores HTTP mock durante o de
    - [request](#request)
    - [decrypt / encrypt](#decrypt--encrypt)
 5. [Criptografia RSA](#criptografia-rsa)
+   - [Configuração no YAML](#configuração-no-yaml)
+   - [Flags por rota](#flags-por-rota)
+   - [Enviando body criptografado com mockr request](#enviando-body-criptografado-com-mockr-request)
 6. [Templates dinâmicos](#templates-dinâmicos)
 7. [Respostas de erro](#respostas-de-erro)
 8. [Interface TUI](#interface-tui)
@@ -152,6 +155,10 @@ routes:
 | `body` | Não | Caminho para o JSON de body de saída (usado pelo `mockr request`). Suporta templates faker. Aplicável apenas em POST, PUT e PATCH |
 | `headers` | Não | Mapa de headers extras enviados pelo `mockr request`. Valores suportam templates faker |
 | `auth` | Não | Se `true`, executa o fluxo de autenticação do bloco `auth` raiz antes de disparar |
+| `decrypt_request` | Não | Se `true`, descriptografa o body recebido (base64 RSA) antes de processar templates `{{body.*}}`. Requer `crypto.private_key` |
+| `encrypt_response` | Não | Se `true`, criptografa a resposta JSON antes de enviar ao cliente. `Content-Type` muda para `text/plain`. Requer `crypto.public_key` |
+| `encrypt_body` | Não | Se `true`, criptografa o body de saída antes de enviar (usado pelo `mockr request`). Requer `crypto.public_key` |
+| `encrypt_body_wrap` | Não | Se informado, embrulha o base64 criptografado em `{"<campo>": "<base64>"}` com `Content-Type: application/json`. Sem ele, envia o base64 puro com `Content-Type: text/plain`. Dependente de `encrypt_body: true` |
 | `status` | Não | Status HTTP retornado. Padrão: `200` |
 | `delay` | Não | Atraso artificial por requisição. Ex: `50ms`, `1s`, `200ms` |
 
@@ -541,8 +548,121 @@ Os campos `public_key` e `private_key` aceitam dois formatos:
 |---|---|---|
 | `decrypt_request: true` | `crypto.private_key` | Descriptografa o body da request (base64 → JSON) antes de processar templates `{{body.*}}` |
 | `encrypt_response: true` | `crypto.public_key` | Criptografa a resposta JSON (JSON → base64) antes de enviar. `Content-Type` muda para `text/plain` |
+| `encrypt_body: true` | `crypto.public_key` | Criptografa o body de saída antes de enviar (usado pelo `mockr request`) |
+| `encrypt_body_wrap: "<campo>"` | `encrypt_body: true` | Embrulha o base64 no campo informado: `{"<campo>": "<base64>"}` com `Content-Type: application/json`. Omitir = base64 puro com `Content-Type: text/plain` |
 
 Quando `decrypt_request` falha (payload inválido ou chave errada), o body original é usado sem modificação — o handler não retorna erro para não bloquear o fluxo.
+
+---
+
+### Enviando body criptografado com `mockr request`
+
+Use `encrypt_body` nas rotas para que o `mockr request` criptografe automaticamente o payload antes de enviá-lo. O body segue o fluxo normal (carregado do campo `body`, templates faker resolvidos) e só então é criptografado com a chave pública.
+
+**Caso 1 — base64 puro** (`Content-Type: text/plain`)
+
+Quando a API espera o payload base64 diretamente no body da requisição:
+
+```yaml
+crypto:
+  public_key: ./keys/public.pem
+
+routes:
+  - method: POST
+    path: /api/pagamento
+    body: ./examples/pagamento.json
+    response: ./examples/ok.json
+    status: 200
+    encrypt_body: true
+```
+
+O body enviado será o base64 puro, equivalente a rodar `mockr encrypt` na hora da requisição:
+
+```
+POST http://minha-api.com/api/pagamento  →  200  (32ms)
+  Content-Type: text/plain; charset=utf-8
+
+SGVsbG8gV29ybGQhLi4u...
+```
+
+**Caso 2 — base64 embrulhado em JSON** (`Content-Type: application/json`)
+
+Quando a API espera o payload dentro de um campo JSON (padrão comum em integrações Java legadas):
+
+```yaml
+crypto:
+  public_key: ./keys/public.pem
+
+routes:
+  - method: POST
+    path: /api/pagamento
+    body: ./examples/pagamento.json
+    response: ./examples/ok.json
+    status: 200
+    encrypt_body: true
+    encrypt_body_wrap: "body"    # envia {"body": "<base64>"}
+```
+
+O body enviado será um JSON com o campo informado contendo o base64:
+
+```json
+{
+  "body": "SGVsbG8gV29ybGQhLi4u..."
+}
+```
+
+O nome do campo pode ser qualquer string — `"body"`, `"data"`, `"payload"`, `"request"`, etc. Use o que a API de destino espera.
+
+**Combinando com autenticação:**
+
+```yaml
+auth:
+  url: http://minha-api.com/auth
+  method: POST
+  body: ./examples/auth.json
+  extract: "data.token"
+  header: "Authorization"
+  prefix: "Bearer "
+
+routes:
+  - method: POST
+    path: /api/transacao
+    body: ./examples/transacao.json
+    response: ./examples/ok.json
+    status: 200
+    auth: true
+    encrypt_body: true
+    encrypt_body_wrap: "data"
+```
+
+O fluxo completo: autentica → renderiza o body com faker → criptografa → embrulha em `{"data": "..."}` → injeta o token no header → envia.
+
+**Ciclo completo com descriptografia no mock:**
+
+Para testar o round-trip criptografado localmente, use `encrypt_body` na rota de saída e `decrypt_request` no mock que recebe:
+
+```yaml
+crypto:
+  public_key: ./keys/public.pem
+  private_key: ./keys/private.pem
+
+routes:
+  # Rota que recebe o payload criptografado e responde normalmente
+  - method: POST
+    path: /api/pagamento
+    response: ./examples/ok.json
+    status: 200
+    decrypt_request: true      # descriptografa o body recebido
+
+  # Rota usada pelo mockr request para disparar o payload criptografado
+  - method: POST
+    path: /api/pagamento/send
+    body: ./examples/pagamento.json
+    response: ./examples/ok.json
+    status: 200
+    encrypt_body: true
+    encrypt_body_wrap: "body"
+```
 
 ### Formato dos arquivos PEM
 

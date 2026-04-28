@@ -51,8 +51,10 @@ type Route struct {
 	BodyFile        string            `yaml:"body"`             // JSON de body para POST/PUT/PATCH (suporta templates faker)
 	Headers         map[string]string `yaml:"headers"`          // headers extras enviados pelo mockr request (suporta templates)
 	UseAuth         bool              `yaml:"auth"`             // se true, dispara o fluxo auth antes da requisição
-	DecryptRequest  bool              `yaml:"decrypt_request"`  // descriptografa o body da request antes de processar templates
-	EncryptResponse bool              `yaml:"encrypt_response"` // criptografa a resposta antes de enviar ao cliente
+	DecryptRequest  bool              `yaml:"decrypt_request"`   // descriptografa o body da request antes de processar templates
+	EncryptResponse bool              `yaml:"encrypt_response"`  // criptografa a resposta antes de enviar ao cliente
+	EncryptBody     bool              `yaml:"encrypt_body"`      // criptografa o body de saída antes de enviar (mockr request)
+	EncryptBodyWrap string            `yaml:"encrypt_body_wrap"` // se não vazio, embrulha o base64 em {"<campo>": "<base64>"}
 	StatusCode      int               `yaml:"status"`
 	Delay           time.Duration     `yaml:"delay"`
 }
