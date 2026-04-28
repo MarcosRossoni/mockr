@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -72,16 +73,18 @@ func LoadPrivateKey(source string) (*rsa.PrivateKey, error) {
 }
 
 // Encrypt replica exatamente a sequência Java:
-//  1. URLEncoder.encode(rawJson, UTF-8)   → url.QueryEscape
-//  2. RSA/PKCS1v15 encrypt em chunks      → processChunksEncrypt
-//  3. Base64.getEncoder().encodeToString  → base64.StdEncoding
+//  1. URLEncoder.encode(rawJson, UTF-8)              → url.QueryEscape
+//  2. RSA/OAEP-SHA256/MGF1 encrypt em chunks         → processChunksEncrypt
+//  3. Base64.getEncoder().encodeToString             → base64.StdEncoding
+//
+// Compatível com Java: RSA/ECB/OAEPWithSHA-256AndMGF1Padding
 func Encrypt(plainText string, pubKey *rsa.PublicKey) (string, error) {
 	encoded := url.QueryEscape(plainText)
 	data := []byte(encoded)
 
-	// Tamanho máximo por chunk para PKCS1v15: keySize - 11
-	// (equivale ao ENCRYPT_CHUNK_SIZE do Java)
-	chunkSize := pubKey.Size() - 11
+	// Tamanho máximo por chunk para OAEP com SHA-256: keySize - 2*hashLen - 2
+	// Para chave 2048-bit: 256 - 64 - 2 = 190 bytes
+	chunkSize := pubKey.Size() - 2*sha256.Size - 2
 
 	encrypted, err := processChunksEncrypt(data, chunkSize, pubKey)
 	if err != nil {
@@ -92,17 +95,18 @@ func Encrypt(plainText string, pubKey *rsa.PublicKey) (string, error) {
 }
 
 // Decrypt replica exatamente a sequência Java:
-//  1. Base64.getDecoder().decode           → base64.StdEncoding
-//  2. RSA/PKCS1v15 decrypt em chunks       → processChunksDecrypt
-//  3. URLDecoder.decode(result, UTF-8)     → url.QueryUnescape
+//  1. Base64.getDecoder().decode                     → base64.StdEncoding
+//  2. RSA/OAEP-SHA256/MGF1 decrypt em chunks         → processChunksDecrypt
+//  3. URLDecoder.decode(result, UTF-8)               → url.QueryUnescape
+//
+// Compatível com Java: RSA/ECB/OAEPWithSHA-256AndMGF1Padding
 func Decrypt(cipherText string, privKey *rsa.PrivateKey) (string, error) {
 	encryptedBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cipherText))
 	if err != nil {
 		return "", fmt.Errorf("cryptoutil: base64 inválido: %w", err)
 	}
 
-	// Tamanho de cada bloco cifrado = tamanho da chave em bytes
-	// (equivale ao DECRYPT_CHUNK_SIZE do Java)
+	// Cada bloco cifrado tem exatamente keySize bytes (ex: 256 para chave 2048-bit)
 	chunkSize := privKey.Size()
 
 	decrypted, err := processChunksDecrypt(encryptedBytes, chunkSize, privKey)
@@ -129,8 +133,7 @@ func PrettyJSON(raw string) string {
 }
 
 // processChunksEncrypt replica o processInChunks do Java no modo ENCRYPT_MODE.
-// Divide os dados em blocos de chunkSize bytes e criptografa cada bloco separadamente,
-// concatenando os resultados — necessário porque RSA tem limite de bytes por operação.
+// Usa RSA-OAEP com SHA-256 — compatível com RSA/ECB/OAEPWithSHA-256AndMGF1Padding do Java.
 func processChunksEncrypt(data []byte, chunkSize int, key *rsa.PublicKey) ([]byte, error) {
 	var buf bytes.Buffer
 	for offset := 0; offset < len(data); {
@@ -138,7 +141,7 @@ func processChunksEncrypt(data []byte, chunkSize int, key *rsa.PublicKey) ([]byt
 		if end > len(data) {
 			end = len(data)
 		}
-		chunk, err := rsa.EncryptPKCS1v15(rand.Reader, key, data[offset:end])
+		chunk, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, key, data[offset:end], nil)
 		if err != nil {
 			return nil, err
 		}
@@ -149,7 +152,7 @@ func processChunksEncrypt(data []byte, chunkSize int, key *rsa.PublicKey) ([]byt
 }
 
 // processChunksDecrypt replica o processInChunks do Java no modo DECRYPT_MODE.
-// Cada bloco cifrado tem exatamente chunkSize bytes (= tamanho da chave RSA).
+// Usa RSA-OAEP com SHA-256 — compatível com RSA/ECB/OAEPWithSHA-256AndMGF1Padding do Java.
 func processChunksDecrypt(data []byte, chunkSize int, key *rsa.PrivateKey) ([]byte, error) {
 	var buf bytes.Buffer
 	for offset := 0; offset < len(data); {
@@ -157,7 +160,7 @@ func processChunksDecrypt(data []byte, chunkSize int, key *rsa.PrivateKey) ([]by
 		if end > len(data) {
 			end = len(data)
 		}
-		chunk, err := rsa.DecryptPKCS1v15(rand.Reader, key, data[offset:end])
+		chunk, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, key, data[offset:end], nil)
 		if err != nil {
 			return nil, err
 		}
